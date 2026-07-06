@@ -123,13 +123,13 @@ let rec gen_expr ctx = function
         gen_expr ctx l;
         let rec pow2 k acc = if acc = n then k else pow2 (k+1) (acc*2) in
         emit ctx "  slli a0, a0, %d" (pow2 0 1)
-      | _, Some n, Add ->
+      | _, Some n, Add when n >= -2048 && n <= 2047 ->
         gen_expr ctx l;
         emit ctx "  addi a0, a0, %d" n
-      | Some n, _, Add ->
+      | Some n, _, Add when n >= -2048 && n <= 2047 ->
         gen_expr ctx r;
         emit ctx "  addi a0, a0, %d" n
-      | _, Some n, Sub ->
+      | _, Some n, Sub when n >= -2048 && n <= 2047 ->
         gen_expr ctx l;
         emit ctx "  addi a0, a0, %d" (-n)
       | _ ->
