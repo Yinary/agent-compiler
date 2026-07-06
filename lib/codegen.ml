@@ -101,17 +101,22 @@ let rec gen_expr ctx = function
      | Not -> emit ctx "  seqz a0, a0")
   | Call (name, args) ->
     let nargs = List.length args in
-    let save_size = (nargs + 1) * 4 in (* +1 for ra *)
+    let stack_args = max 0 (nargs - 8) in
+    (* Allocate space for extra arguments + ra *)
+    let save_size = (stack_args + 1) * 4 in
     emit ctx "  addi sp, sp, -%d" save_size;
     emit ctx "  sw ra, %d(sp)" (save_size - 4);
-    (* Evaluate all arguments and store on stack *)
-    List.iteri (fun i arg ->
+    (* Evaluate and store extra arguments (beyond 8) at sp+0, sp+4, etc. *)
+    for i = 8 to nargs - 1 do
+      let arg = List.nth args i in
       gen_expr ctx arg;
-      emit ctx "  sw a0, %d(sp)" (i * 4)
-    ) args;
-    (* Load arguments into registers *)
-    for i = 0 to min 7 (nargs - 1) do
-      emit ctx "  lw a%d, %d(sp)" i (i * 4)
+      emit ctx "  sw a0, %d(sp)" ((i - 8) * 4)
+    done;
+    (* Evaluate and load first 8 arguments into registers *)
+    for i = min 7 (nargs - 1) downto 0 do
+      let arg = List.nth args i in
+      gen_expr ctx arg;
+      emit ctx "  mv a%d, a0" i
     done;
     emit ctx "  call %s" name;
     emit ctx "  lw ra, %d(sp)" (save_size - 4);
@@ -216,13 +221,14 @@ let gen_func_def ctx fd =
   let param_space = reg_params * 4 in
   if param_space > 0 then
     emit ctx "  addi sp, sp, -%d" param_space;
-  (* Store parameters *)
+  (* Store parameters at sp-relative offsets, but record fp-relative offsets *)
   for i = 0 to reg_params - 1 do
-    let off = -(i * 4 + 4) in
-    emit ctx "  sw a%d, %d(fp)" i off;
+    let sp_off = i * 4 in
+    let fp_off = sp_off - param_space in
+    emit ctx "  sw a%d, %d(sp)" i sp_off;
     match ctx.var_offsets with
     | current :: rest ->
-      ctx.var_offsets <- StringMap.add params.(i) off current :: rest
+      ctx.var_offsets <- StringMap.add params.(i) fp_off current :: rest
     | [] -> failwith "No scope"
   done;
   (* Stack parameters are at fp+8, fp+12, etc. *)
