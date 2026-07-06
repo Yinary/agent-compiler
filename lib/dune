@@ -1,0 +1,7 @@
+(library
+ (name toyc)
+ (libraries menhirLib)
+ (wrapped false))
+
+(menhir
+ (modules parser))
