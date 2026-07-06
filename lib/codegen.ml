@@ -271,6 +271,8 @@ let gen_func_def ctx fd =
       ctx.var_offsets <- StringMap.add params.(i) fp_off current :: rest
     | [] -> failwith "No scope"
   done;
+  (* Local variables start below parameters *)
+  ctx.frame_offset <- -param_space;
   (* Stack parameters are at fp+40, fp+44, etc. (8 for ra/fp + 32 for register params) *)
   for i = 8 to nparams - 1 do
     let off = 40 + (i - 8) * 4 in
