@@ -6,6 +6,7 @@ type sym_info = {
   sym_type: typ;
   is_const: bool;
   is_global: bool;
+  const_value: int option;
 }
 
 type func_info = {
@@ -61,9 +62,7 @@ let rec eval_const_expr env = function
   | IntLit n -> Some n
   | Id name ->
     (match lookup name env with
-     | Some { is_const = true; _ } ->
-       (* For global const, we need to track their values *)
-       None (* simplified: would need to track const values *)
+     | Some { is_const = true; const_value = Some v; _ } -> Some v
      | _ -> None)
   | BinOp (op, l, r) ->
     (match eval_const_expr env l, eval_const_expr env r with
@@ -123,10 +122,10 @@ let rec check_stmt env = function
      | None -> failwith ("Undeclared variable: " ^ name))
   | DeclStmt (ConstDecl (name, e)) ->
     ignore (check_expr env e);
-    add_symbol name { sym_type = Int; is_const = true; is_global = false } env
+    add_symbol name { sym_type = Int; is_const = true; is_global = false; const_value = None } env
   | DeclStmt (VarDecl (name, e)) ->
     ignore (check_expr env e);
-    add_symbol name { sym_type = Int; is_const = false; is_global = false } env
+    add_symbol name { sym_type = Int; is_const = false; is_global = false; const_value = None } env
   | If (cond, s1, s2) ->
     ignore (check_expr env cond);
     ignore (check_stmt env s1);
@@ -160,7 +159,7 @@ let check_func_def env fd =
   let env' = add_function fd.name fi env in
   let func_env = { env' with current_func = Some fd.ret_type } in
   let func_env = List.fold_left
-    (fun e p -> add_symbol p { sym_type = Int; is_const = false; is_global = false } e)
+    (fun e p -> add_symbol p { sym_type = Int; is_const = false; is_global = false; const_value = None } e)
     func_env fd.params
   in
   let _ = List.fold_left check_stmt func_env fd.body in
@@ -175,6 +174,10 @@ let check_program prog =
       let params_types = List.map (fun _ -> Int) fd.params in
       let fi = { func_ret_type = fd.ret_type; func_params = params_types } in
       add_function fd.name fi e
+    | FuncDecl fd ->
+      let params_types = List.map (fun _ -> Int) fd.params in
+      let fi = { func_ret_type = fd.ret_type; func_params = params_types } in
+      add_function fd.name fi e
     | GlobalDecl _ -> e
   ) env prog in
   (* Second pass: check everything *)
@@ -182,11 +185,14 @@ let check_program prog =
     match item with
     | GlobalDecl (ConstDecl (name, init)) ->
       ignore (check_expr e init);
-      add_symbol name { sym_type = Int; is_const = true; is_global = true } e
+      let const_val = eval_const_expr e init in
+      add_symbol name { sym_type = Int; is_const = true; is_global = true; const_value = const_val } e
     | GlobalDecl (VarDecl (name, init)) ->
       ignore (check_expr e init);
-      add_symbol name { sym_type = Int; is_const = false; is_global = true } e
+      let const_val = eval_const_expr e init in
+      add_symbol name { sym_type = Int; is_const = false; is_global = true; const_value = const_val } e
     | FuncDef fd -> check_func_def e fd
+    | FuncDecl _ -> e
   ) env prog in
   (* Check main function exists *)
   match lookup_function "main" env with

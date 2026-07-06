@@ -32,6 +32,13 @@ comp_unit_items:
 comp_unit_item:
   | d = global_decl { GlobalDecl d }
   | f = func_def { FuncDef f }
+  | f = func_decl { FuncDecl f }
+
+func_decl:
+  | INT name = ID LPAREN params = separated_list(COMMA, param) RPAREN SEMICOLON
+    { { ret_type = Int; name; params; body = [] } }
+  | VOID name = ID LPAREN params = separated_list(COMMA, param) RPAREN SEMICOLON
+    { { ret_type = Void; name; params; body = [] } }
 
 global_decl:
   | CONST INT name = ID ASSIGN init = expr SEMICOLON { ConstDecl (name, init) }
@@ -100,6 +107,7 @@ mul_expr:
 
 unary_expr:
   | e = primary_expr { e }
+  | PLUS e = unary_expr %prec UMINUS { e }
   | MINUS e = unary_expr %prec UMINUS { UnaryOp (Neg, e) }
   | NOT e = unary_expr %prec UNOT { UnaryOp (Not, e) }
 

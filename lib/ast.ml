@@ -42,5 +42,6 @@ type func_def = {
 type comp_unit_item =
   | GlobalDecl of decl
   | FuncDef of func_def
+  | FuncDecl of func_def
 
 type program = comp_unit_item list

@@ -13,7 +13,7 @@ let next_line lexbuf =
 let digit = ['0'-'9']
 let alpha = ['a'-'z' 'A'-'Z' '_']
 let id = alpha (alpha | digit)*
-let num = '-'? ('0' | ['1'-'9'] digit*)
+let num = digit+
 
 rule token = parse
   | [' ' '\t' '\r']+ { token lexbuf }
