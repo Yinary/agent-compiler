@@ -2,4 +2,3 @@ _build/
 *.exe
 *.o
 *.s
-lib/lexer.ml
