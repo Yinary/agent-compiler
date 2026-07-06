@@ -110,6 +110,28 @@ let rec gen_expr ctx = function
       | Some lv, Some rv, Ge -> emit ctx "  li a0, %d" (if lv >= rv then 1 else 0)
       | Some lv, Some rv, Eq -> emit ctx "  li a0, %d" (if lv = rv then 1 else 0)
       | Some lv, Some rv, Neq -> emit ctx "  li a0, %d" (if lv <> rv then 1 else 0)
+      | _, Some 0, Add -> gen_expr ctx l
+      | Some 0, _, Add -> gen_expr ctx r
+      | _, Some 0, Sub -> gen_expr ctx l
+      | Some 0, _, Mul -> emit ctx "  li a0, 0"
+      | _, Some 0, Mul -> emit ctx "  li a0, 0"
+      | Some 1, _, Mul -> gen_expr ctx r
+      | _, Some 1, Mul -> gen_expr ctx l
+      | _, Some 1, Div -> gen_expr ctx l
+      | _, Some 1, Mod -> emit ctx "  li a0, 0"
+      | _, Some n, Mul when n > 0 && (n land (n-1)) = 0 ->
+        gen_expr ctx l;
+        let rec pow2 k acc = if acc = n then k else pow2 (k+1) (acc*2) in
+        emit ctx "  slli a0, a0, %d" (pow2 0 1)
+      | _, Some n, Add ->
+        gen_expr ctx l;
+        emit ctx "  addi a0, a0, %d" n
+      | Some n, _, Add ->
+        gen_expr ctx r;
+        emit ctx "  addi a0, a0, %d" n
+      | _, Some n, Sub ->
+        gen_expr ctx l;
+        emit ctx "  addi a0, a0, %d" (-n)
       | _ ->
         gen_expr ctx r;
         emit ctx "  addi sp, sp, -4";
@@ -125,18 +147,10 @@ let rec gen_expr ctx = function
          | Mod -> emit ctx "  rem a0, a0, t1"
          | Lt -> emit ctx "  slt a0, a0, t1"
          | Gt -> emit ctx "  slt a0, t1, a0"
-         | Le ->
-           emit ctx "  slt a0, t1, a0";
-           emit ctx "  xori a0, a0, 1"
-         | Ge ->
-           emit ctx "  slt a0, a0, t1";
-           emit ctx "  xori a0, a0, 1"
-         | Eq ->
-           emit ctx "  sub a0, a0, t1";
-           emit ctx "  seqz a0, a0"
-         | Neq ->
-           emit ctx "  sub a0, a0, t1";
-           emit ctx "  snez a0, a0"
+         | Le -> emit ctx "  slt a0, t1, a0"; emit ctx "  xori a0, a0, 1"
+         | Ge -> emit ctx "  slt a0, a0, t1"; emit ctx "  xori a0, a0, 1"
+         | Eq -> emit ctx "  sub a0, a0, t1"; emit ctx "  seqz a0, a0"
+         | Neq -> emit ctx "  sub a0, a0, t1"; emit ctx "  snez a0, a0"
          | And | Or -> failwith "unreachable"))
   | UnaryOp (op, e) ->
     gen_expr ctx e;
@@ -165,7 +179,12 @@ let rec gen_expr ctx = function
 let rec gen_stmt ctx = function
   | Block stmts ->
     push_scope ctx;
+    let saved_offset = ctx.frame_offset in
     List.iter (gen_stmt ctx) stmts;
+    let allocated = saved_offset - ctx.frame_offset in
+    if allocated > 0 then
+      emit ctx "  addi sp, sp, %d" allocated;
+    ctx.frame_offset <- saved_offset;
     pop_scope ctx
   | Empty -> ()
   | ExprStmt e -> gen_expr ctx e
