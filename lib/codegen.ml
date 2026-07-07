@@ -2,6 +2,11 @@ open Ast
 
 module StringMap = Map.Make(String)
 
+type var_loc =
+  | Reg of int
+  | Stack of int
+  | Global of string
+
 type ctx = {
   buf: Buffer.t;
   mutable label_count: int;
@@ -11,6 +16,10 @@ type ctx = {
   mutable continue_label: string option;
   mutable func_ret_label: string option;
   mutable temp_depth: int;
+  mutable reg_map: int StringMap.t;
+  mutable next_reg: int;
+  mutable max_reg: int;
+  mutable reg_save: (int StringMap.t * int) list;
 }
 
 let new_label ctx prefix =
@@ -44,20 +53,28 @@ let rec eval_const_expr globals = function
   | _ -> None
 
 let push_scope ctx =
-  ctx.var_offsets <- StringMap.empty :: ctx.var_offsets
+  ctx.var_offsets <- StringMap.empty :: ctx.var_offsets;
+  ctx.reg_save <- (ctx.reg_map, ctx.next_reg) :: ctx.reg_save
 
 let pop_scope ctx =
-  match ctx.var_offsets with
-  | _ :: rest -> ctx.var_offsets <- rest
-  | [] -> failwith "Cannot pop global scope"
+  (match ctx.var_offsets with _ :: rest -> ctx.var_offsets <- rest | [] -> ());
+  (match ctx.reg_save with
+   | (m, n) :: rest -> ctx.reg_map <- m; ctx.next_reg <- n; ctx.reg_save <- rest
+   | [] -> ())
 
 let add_var ctx name =
-  ctx.frame_offset <- ctx.frame_offset - 4;
-  let off = ctx.frame_offset in
-  match ctx.var_offsets with
-  | current :: rest ->
-    ctx.var_offsets <- StringMap.add name off current :: rest
-  | [] -> failwith "No scope"
+  if ctx.next_reg <= ctx.max_reg then begin
+    let reg = ctx.next_reg in
+    ctx.next_reg <- reg + 1;
+    ctx.reg_map <- StringMap.add name reg ctx.reg_map
+  end else begin
+    ctx.frame_offset <- ctx.frame_offset - 4;
+    let off = ctx.frame_offset in
+    (match ctx.var_offsets with
+     | current :: rest ->
+       ctx.var_offsets <- StringMap.add name off current :: rest
+     | [] -> failwith "No scope")
+  end
 
 let lookup_var ctx name =
   let rec find = function
@@ -68,6 +85,14 @@ let lookup_var ctx name =
       | None -> find rest
   in
   find ctx.var_offsets
+
+let get_var_loc ctx name =
+  match StringMap.find_opt name ctx.reg_map with
+  | Some reg -> Reg reg
+  | None ->
+    (match lookup_var ctx name with
+     | Some off -> Stack off
+     | None -> Global name)
 
 let count_vars stmts =
   let count = ref 0 in
@@ -82,21 +107,13 @@ let count_vars stmts =
   List.iter count_stmt stmts;
   !count
 
-let binop_instr = function
-  | Add -> "add" | Sub -> "sub" | Mul -> "mul"
-  | Div -> "div" | Mod -> "rem"
-  | Lt -> "slt" | Gt -> "slt"
-  | _ -> failwith "not a simple binop"
-
 let rec gen_expr ctx = function
-  | IntLit n ->
-    emit ctx "  li a0, %d" n
+  | IntLit n -> emit ctx "  li a0, %d" n
   | Id name ->
-    (match lookup_var ctx name with
-     | Some off -> emit ctx "  lw a0, %d(fp)" off
-     | None ->
-       emit ctx "  la t0, %s" name;
-       emit ctx "  lw a0, 0(t0)")
+    (match get_var_loc ctx name with
+     | Reg r -> emit ctx "  mv a0, s%d" r
+     | Stack off -> emit ctx "  lw a0, %d(fp)" off
+     | Global n -> emit ctx "  la t0, %s" n; emit ctx "  lw a0, 0(t0)")
   | BinOp (And, l, r) ->
     let lend = new_label ctx "and_end" in
     gen_expr ctx l;
@@ -210,6 +227,12 @@ let rec gen_expr ctx = function
     emit ctx "  lw ra, %d(sp)" (save_size - 4);
     emit ctx "  addi sp, sp, %d" save_size
 
+let store_var ctx name =
+  match get_var_loc ctx name with
+  | Reg r -> emit ctx "  mv s%d, a0" r
+  | Stack off -> emit ctx "  sw a0, %d(fp)" off
+  | Global n -> emit ctx "  la t0, %s" n; emit ctx "  sw a0, 0(t0)"
+
 let rec gen_stmt ctx = function
   | Block stmts ->
     push_scope ctx;
@@ -219,25 +242,9 @@ let rec gen_stmt ctx = function
     pop_scope ctx
   | Empty -> ()
   | ExprStmt e -> gen_expr ctx e
-  | Assign (name, e) ->
-    gen_expr ctx e;
-    (match lookup_var ctx name with
-     | Some off -> emit ctx "  sw a0, %d(fp)" off
-     | None ->
-       emit ctx "  la t0, %s" name;
-       emit ctx "  sw a0, 0(t0)")
-  | DeclStmt (ConstDecl (name, e)) ->
-    gen_expr ctx e;
-    add_var ctx name;
-    (match lookup_var ctx name with
-     | Some off -> emit ctx "  sw a0, %d(fp)" off
-     | None -> ())
-  | DeclStmt (VarDecl (name, e)) ->
-    gen_expr ctx e;
-    add_var ctx name;
-    (match lookup_var ctx name with
-     | Some off -> emit ctx "  sw a0, %d(fp)" off
-     | None -> ())
+  | Assign (name, e) -> gen_expr ctx e; store_var ctx name
+  | DeclStmt (ConstDecl (name, e)) -> gen_expr ctx e; add_var ctx name; store_var ctx name
+  | DeclStmt (VarDecl (name, e)) -> gen_expr ctx e; add_var ctx name; store_var ctx name
   | If (cond, s1, s2) ->
     (match s2 with
      | Some s2 ->
@@ -293,63 +300,83 @@ let gen_func_def ctx fd =
   ctx.func_ret_label <- Some ret_label;
   let old_offset = ctx.frame_offset in
   let old_depth = ctx.temp_depth in
+  let old_reg_map = ctx.reg_map in
+  let old_next_reg = ctx.next_reg in
+  let old_reg_save = ctx.reg_save in
   ctx.temp_depth <- 0;
   ctx.frame_offset <- 0;
+  ctx.reg_map <- StringMap.empty;
+  ctx.next_reg <- 5;
+  ctx.reg_save <- [];
   push_scope ctx;
-  emit ctx "";
-  emit ctx ".globl %s" fd.name;
-  emit ctx "%s:" fd.name;
   let params = Array.of_list fd.params in
   let nparams = Array.length params in
   let reg_params = min nparams 8 in
-  let param_space = reg_params * 4 in
-  let nvars = count_vars fd.body in
-  let var_space = nvars * 4 in
-  (* Prologue: save ra, fp, s1-s4 *)
-  emit ctx "  addi sp, sp, -24";
-  emit ctx "  sw ra, 20(sp)";
-  emit ctx "  sw fp, 16(sp)";
-  emit ctx "  sw s1, 12(sp)";
-  emit ctx "  sw s2, 8(sp)";
-  emit ctx "  sw s3, 4(sp)";
-  emit ctx "  sw s4, 0(sp)";
-  emit ctx "  mv fp, sp";
-  (* Allocate space for params + vars *)
+  let nlocals = count_vars fd.body in
+  let total_vars = nparams + nlocals in
+  let n_var_regs = min total_vars 7 in
+  ctx.max_reg <- 5 + n_var_regs - 1;
+  if ctx.max_reg < 4 then ctx.max_reg <- 4;
+  let param_space = max 0 (reg_params - n_var_regs) * 4 in
+  let var_space = max 0 (nlocals - max 0 (n_var_regs - nparams)) * 4 in
   let total_local = param_space + var_space in
+  emit ctx "";
+  emit ctx ".globl %s" fd.name;
+  emit ctx "%s:" fd.name;
+  let n_saved = 2 + 4 + n_var_regs in
+  emit ctx "  addi sp, sp, -%d" (n_saved * 4);
+  emit ctx "  sw ra, %d(sp)" ((n_saved - 1) * 4);
+  emit ctx "  sw fp, %d(sp)" ((n_saved - 2) * 4);
+  for i = 0 to 3 do
+    emit ctx "  sw s%d, %d(sp)" (i + 1) ((n_saved - 3 - i) * 4)
+  done;
+  for i = 0 to n_var_regs - 1 do
+    emit ctx "  sw s%d, %d(sp)" (i + 5) ((n_saved - 7 - i) * 4)
+  done;
+  emit ctx "  mv fp, sp";
   if total_local > 0 then
     emit ctx "  addi sp, sp, -%d" total_local;
-  (* Store parameters *)
   for i = 0 to reg_params - 1 do
-    let fp_off = -(i * 4 + 4) in
-    emit ctx "  sw a%d, %d(fp)" i fp_off;
-    match ctx.var_offsets with
-    | current :: rest ->
-      ctx.var_offsets <- StringMap.add params.(i) fp_off current :: rest
-    | [] -> failwith "No scope"
+    if ctx.next_reg <= ctx.max_reg then begin
+      let reg = ctx.next_reg in
+      ctx.next_reg <- reg + 1;
+      ctx.reg_map <- StringMap.add params.(i) reg ctx.reg_map;
+      emit ctx "  mv s%d, a%d" reg i
+    end else begin
+      let fp_off = -(ctx.frame_offset + 4) in
+      ctx.frame_offset <- ctx.frame_offset + 4;
+      emit ctx "  sw a%d, %d(fp)" i fp_off;
+      (match ctx.var_offsets with
+       | current :: rest -> ctx.var_offsets <- StringMap.add params.(i) fp_off current :: rest
+       | [] -> failwith "No scope")
+    end
   done;
   ctx.frame_offset <- -param_space;
-  (* Stack parameters at fp+56 (24 saved regs + 32 param space) *)
   for i = 8 to nparams - 1 do
-    let off = 56 + (i - 8) * 4 in
-    match ctx.var_offsets with
-    | current :: rest ->
-      ctx.var_offsets <- StringMap.add params.(i) off current :: rest
-    | [] -> failwith "No scope"
+    let off = (n_saved * 4) + (i - 8) * 4 in
+    (match ctx.var_offsets with
+     | current :: rest -> ctx.var_offsets <- StringMap.add params.(i) off current :: rest
+     | [] -> failwith "No scope")
   done;
   List.iter (gen_stmt ctx) fd.body;
   emit ctx "%s:" ret_label;
   emit ctx "  mv sp, fp";
-  emit ctx "  lw s4, 0(sp)";
-  emit ctx "  lw s3, 4(sp)";
-  emit ctx "  lw s2, 8(sp)";
-  emit ctx "  lw s1, 12(sp)";
-  emit ctx "  lw fp, 16(sp)";
-  emit ctx "  lw ra, 20(sp)";
-  emit ctx "  addi sp, sp, 24";
+  for i = 0 to n_var_regs - 1 do
+    emit ctx "  lw s%d, %d(sp)" (i + 5) ((n_saved - 7 - i) * 4)
+  done;
+  for i = 0 to 3 do
+    emit ctx "  lw s%d, %d(sp)" (i + 1) ((n_saved - 3 - i) * 4)
+  done;
+  emit ctx "  lw fp, %d(sp)" ((n_saved - 2) * 4);
+  emit ctx "  lw ra, %d(sp)" ((n_saved - 1) * 4);
+  emit ctx "  addi sp, sp, %d" (n_saved * 4);
   emit ctx "  ret";
   pop_scope ctx;
   ctx.frame_offset <- old_offset;
   ctx.temp_depth <- old_depth;
+  ctx.reg_map <- old_reg_map;
+  ctx.next_reg <- old_next_reg;
+  ctx.reg_save <- old_reg_save;
   ctx.func_ret_label <- old_ret
 
 let gen_program prog =
@@ -362,6 +389,10 @@ let gen_program prog =
     continue_label = None;
     func_ret_label = None;
     temp_depth = 0;
+    reg_map = StringMap.empty;
+    next_reg = 5;
+    max_reg = 11;
+    reg_save = [];
   } in
   let globals = List.fold_left (fun acc item ->
     match item with
