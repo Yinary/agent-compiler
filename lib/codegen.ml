@@ -68,6 +68,7 @@ let add_var ctx name =
     ctx.next_reg <- reg + 1;
     ctx.reg_map <- StringMap.add name reg ctx.reg_map
   end else begin
+    ctx.reg_map <- StringMap.remove name ctx.reg_map;
     ctx.frame_offset <- ctx.frame_offset - 4;
     let off = ctx.frame_offset in
     (match ctx.var_offsets with
@@ -353,7 +354,7 @@ let gen_func_def ctx fd =
   done;
   ctx.frame_offset <- -param_space;
   for i = 8 to nparams - 1 do
-    let off = (n_saved * 4) + (i - 8) * 4 in
+    let off = (n_saved * 4) + i * 4 in
     (match ctx.var_offsets with
      | current :: rest -> ctx.var_offsets <- StringMap.add params.(i) off current :: rest
      | [] -> failwith "No scope")
